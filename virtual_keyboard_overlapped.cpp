@@ -198,6 +198,11 @@ namespace
             return m_handle;
         }
 
+        void set_post_quit_on_close(bool value)
+        {
+            m_post_quit_on_close = value;
+        }
+
         void set_completed()
         {
             if (m_completed)
@@ -225,7 +230,10 @@ namespace
 
             complete_overlapped(ERROR_SUCCESS, bytes_written);
             DestroyWindow(m_handle);
-            PostQuitMessage(0);
+            if (m_post_quit_on_close)
+            {
+                PostQuitMessage(0);
+            }
         }
 
         void set_cancelled()
@@ -238,7 +246,10 @@ namespace
             m_completed = true;
             complete_overlapped(ERROR_CANCELLED, 0);
             DestroyWindow(m_handle);
-            PostQuitMessage(0);
+            if (m_post_quit_on_close)
+            {
+                PostQuitMessage(0);
+            }
         }
 
         static LRESULT CALLBACK static_window_proc(HWND window_handle, UINT message, WPARAM w_param, LPARAM l_param)
@@ -1366,6 +1377,16 @@ namespace
             case WM_NCDESTROY:
                 KillTimer(m_handle, k_controller_timer_id);
                 release_fonts();
+                if (g_virtual_keyboard == this)
+                {
+                    g_virtual_keyboard = nullptr;
+                }
+                // Self-owned when embedded (NO_MAIN); standalone main also
+                // deletes, so only auto-delete when not posting quit.
+                if (!m_post_quit_on_close)
+                {
+                    delete this;
+                }
                 break;
 
             default:
@@ -1429,6 +1450,7 @@ namespace
         int m_caret = 0;
         bool m_caps = false;
         bool m_completed = false;
+        bool m_post_quit_on_close = true;
     };
 
     void initialize_overlapped(OVERLAPPED* overlapped)
@@ -1481,6 +1503,9 @@ unsigned long online_guide_show_virtual_keyboard_ui(
         if (keyboard->create())
         {
             g_virtual_keyboard = keyboard;
+#ifdef VIRTUAL_KEYBOARD_NO_MAIN
+            keyboard->set_post_quit_on_close(false);
+#endif
             result = ERROR_IO_PENDING;
         }
         else
@@ -1497,6 +1522,7 @@ unsigned long online_guide_show_virtual_keyboard_ui(
     return result;
 }
 
+#ifndef VIRTUAL_KEYBOARD_NO_MAIN
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
     (void)instance;
@@ -1540,3 +1566,4 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 
     return overlapped.Internal == ERROR_SUCCESS ? 0 : static_cast<int>(overlapped.Internal);
 }
+#endif // VIRTUAL_KEYBOARD_NO_MAIN

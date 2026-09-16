@@ -1,8 +1,13 @@
-# PC Virtual Keyboard (Xbox 360 Style)
+# PC Xbox 360 UI (Virtual Keyboard + NXE Friends List)
 
-A Win32 virtual keyboard that recreates the classic Xbox 360 / Xbox Live Guide on-screen keyboard. Designed as a drop-in overlay for games and applications that need controller-friendly text input on PC.
+Win32 recreations of classic Xbox 360 / NXE UI overlays:
 
-![Virtual Keyboard](preview.jpg)
+- **Virtual Keyboard** – Xbox Live Guide style on-screen keyboard
+- **Friends List** – NXE Guide-style friends list with presence, gamerscore, and controller navigation
+
+Designed as drop-in overlays for games and applications that need authentic Xbox 360-era UI on PC.
+
+![Virtual Keyboard](preview.png)
 
 ## Features
 
@@ -28,6 +33,91 @@ A Win32 virtual keyboard that recreates the classic Xbox 360 / Xbox Live Guide o
 | **Start** | Done |
 | **D-pad / Left Stick** | Move focus between keys |
 | **Arrow keys** | Move focus (Ctrl+Left/Right moves caret) |
+
+
+## Friends List
+
+`pc_friends_list.exe` opens a transparent overlay that mimics the classic Xbox 360 Guide friends list (the text/list version available from the Guide button during NXE):
+
+- Online / Away / Busy / Offline status with colored indicators
+- Presence strings ("Playing Halo 3", "Away", etc.)
+- Gamerscore display
+- Favorites sorted to the top of each presence group
+- Scrollable list with mouse wheel, D-pad, left stick, and keyboard
+- **A** Select (shows a simple options dialog for the demo)
+- **B** / Esc Back
+
+Sample friends data is hard-coded for demonstration. In a real integration you would feed live presence from Xbox Live / XInput / your own backend.
+
+
+## Quick Launch
+
+`pc_quick_launch.exe` recreates the Guide **Quick Launch** / Game Library list:
+
+- Installed, Arcade, Indie, Demo, and Disc games
+- Box-art placeholder, last played, achievement progress
+- **DISC** badge when a disc is in the tray
+- **A** Launch · **Y** Details · **B** Back
+- Controller, mouse, and keyboard navigation
+
+
+## Gamercard / Profile
+
+`pc_gamercard.exe` recreates the classic Xbox 360 Guide **Gamercard** view:
+
+- Gamerpic placeholder, gamertag, motto, location
+- Stats row: Gamerscore, Reputation, Zone, Games played
+- Bio text
+- Recent achievements list
+- **B** / Esc Back
+
+
+## Party
+
+`pc_party.exe` recreates the NXE **Party** panel:
+
+- Party leader + members with activity ("In party chat", "Playing ...")
+- Talking indicator (bright green dot)
+- Invite online friends into the party
+- Mute toggle per member
+- Capacity display (e.g. 4 / 8)
+- **A** Invite / Select · **Y** Mute · **B** Back
+
+
+## Players Met
+
+`pc_players_met.exe` recreates the Guide **Players Met** list:
+
+- Recent players from multiplayer sessions
+- Game they were met in + when
+- Online / Away / Offline presence
+- **FRIEND** and **FEEDBACK** badges
+- **A** Add Friend · **X** Submit Feedback · **B** Back
+
+
+## Message Center
+
+`pc_message_center.exe` recreates the Guide **Message Center**:
+
+- Text messages, voice messages, game invites, friend requests, party invites
+- Unread indicator bar + unread count in header
+- Color-coded type badges
+- **A** Open · **X** Delete · **B** Back
+
+
+## Unified Guide
+
+`pc_guide.exe` stitches every panel into one **Xbox 360 Guide** overlay:
+
+- Left **blade** navigation: Home, Friends, Messages, Party, Players Met, Quick Launch, Gamercard
+- Right **content** pane switches with the selected section
+- Unread badge on Messages
+- **D-pad / stick** move within blade or list
+- **A** Select / enter section
+- **B** Back to blade (or close Guide from blade)
+- **Y** Toggle focus between blade and content
+- **Messages → A → Reply** opens the virtual keyboard to compose a reply
+- **Left / Right** also switch focus blade <-> content
 
 ## Building
 
@@ -62,10 +152,17 @@ Available configure presets: `x64-debug`, `x64-release`, `x64-relwithdebinfo`, `
 
 You can also open the folder in Visual Studio / VS Code and select a preset from the CMake Tools UI.
 
-The CMakeLists produces a single executable:
+The CMakeLists produces two executables:
 
 ```
 pc_virtual_keyboard.exe
+pc_friends_list.exe
+pc_quick_launch.exe
+pc_gamercard.exe
+pc_party.exe
+pc_players_met.exe
+pc_message_center.exe
+pc_guide.exe          # unified Guide
 ```
 
 ## Usage / API
@@ -103,7 +200,15 @@ All coordinates are defined against a **1280 × 720** reference resolution and s
 ```
 ├── CMakeLists.txt
 ├── CMakePresets.json
-├── virtual_keyboard_overlapped.cpp   # all implementation
+├── virtual_keyboard_overlapped.cpp   # Virtual Keyboard
+├── friends_list.cpp                  # NXE Friends List
+├── quick_launch.cpp                   # Quick Launch / Game Library
+├── gamercard.cpp                      # Profile / Gamercard
+├── party.cpp                          # Party
+├── players_met.cpp                    # Players Met
+├── message_center.cpp                 # Message Center
+├── guide.cpp                          # Unified Guide (all sections)
+├── build-vs2026.bat
 └── README.md
 ```
 
