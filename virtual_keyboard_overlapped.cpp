@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "xbox360_ui_common.h"
+
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "msimg32.lib")
@@ -13,14 +15,12 @@
 
 namespace
 {
+    using namespace xbox360_ui;
+
     class c_virtual_keyboard_window;
     c_virtual_keyboard_window* g_virtual_keyboard = nullptr;
 
     constexpr wchar_t k_window_class_name[] = L"pc_xbox360_virtual_keyboard";
-
-    constexpr int k_reference_width = 1280;
-    constexpr int k_reference_height = 720;
-
     constexpr int k_panel_left = 206;
     constexpr int k_panel_top = 100;
     constexpr int k_panel_right = 1089;
@@ -65,11 +65,6 @@ namespace
     constexpr int k_done_top = 457;
     constexpr int k_done_right = 1059;
     constexpr int k_done_bottom = 538;
-
-    constexpr UINT k_controller_timer_id = 1;
-    constexpr UINT k_controller_poll_ms = 16;
-    constexpr SHORT k_stick_deadzone = 7849;
-
     constexpr int k_index_backspace = 40;
     constexpr int k_index_space = 41;
     constexpr int k_index_done = 42;
@@ -98,30 +93,6 @@ namespace
         e_key_type type = e_key_type::character;
         bool enabled = true;
     };
-
-    int scale_x(int value, int width)
-    {
-        return MulDiv(value, width, k_reference_width);
-    }
-
-    int scale_y(int value, int height)
-    {
-        return MulDiv(value, height, k_reference_height);
-    }
-
-    RECT scale_rect(RECT rect, int width, int height)
-    {
-        return RECT{
-            scale_x(rect.left, width),
-            scale_y(rect.top, height),
-            scale_x(rect.right, width),
-            scale_y(rect.bottom, height)};
-    }
-
-    int round_radius(int width, int height)
-    {
-        return __max(2, scale_y(4, height));
-    }
 
     class c_virtual_keyboard_window
     {
@@ -179,7 +150,7 @@ namespace
                 if (m_handle != nullptr)
                 {
                     // Color-key transparency: pure black pixels become fully transparent.
-                    SetLayeredWindowAttributes(m_handle, RGB(0, 0, 0), 0, LWA_COLORKEY);
+                    SetLayeredWindowAttributes(m_handle, RGB(255, 0, 255), 0, LWA_COLORKEY);
                     create_fonts();
                     build_keyboard();
                     ShowWindow(m_handle, SW_SHOW);
@@ -277,24 +248,6 @@ namespace
         }
 
     private:
-        HFONT make_font(int pixel_height, int weight = FW_NORMAL)
-        {
-            return CreateFontW(
-                pixel_height,
-                0,
-                0,
-                0,
-                weight,
-                FALSE,
-                FALSE,
-                FALSE,
-                DEFAULT_CHARSET,
-                OUT_TT_PRECIS,
-                CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY,
-                DEFAULT_PITCH | FF_SWISS,
-                L"Segoe UI");
-        }
 
         void create_fonts()
         {
@@ -405,26 +358,6 @@ namespace
             return scale_rect(rect, client_rect.right, client_rect.bottom);
         }
 
-        void fill_rect(HDC device_context, RECT rect, COLORREF color) const
-        {
-            HBRUSH brush = CreateSolidBrush(color);
-            FillRect(device_context, &rect, brush);
-            DeleteObject(brush);
-        }
-
-        void fill_round_rect(HDC device_context, RECT rect, COLORREF fill, COLORREF border, int radius) const
-        {
-            HBRUSH brush = CreateSolidBrush(fill);
-            HPEN pen = CreatePen(PS_SOLID, 1, border);
-            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(device_context, brush));
-            HPEN old_pen = static_cast<HPEN>(SelectObject(device_context, pen));
-            RoundRect(device_context, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
-            SelectObject(device_context, old_brush);
-            SelectObject(device_context, old_pen);
-            DeleteObject(pen);
-            DeleteObject(brush);
-        }
-
         void frame_rect(HDC device_context, RECT rect, COLORREF color) const
         {
             HPEN pen = CreatePen(PS_SOLID, 1, color);
@@ -434,30 +367,6 @@ namespace
             SelectObject(device_context, old_brush);
             SelectObject(device_context, old_pen);
             DeleteObject(pen);
-        }
-
-        void draw_text(HDC device_context, HFONT font, RECT rect, wchar_t const* text, UINT format, COLORREF color) const
-        {
-            HFONT old_font = static_cast<HFONT>(SelectObject(device_context, font));
-            COLORREF old_color = SetTextColor(device_context, color);
-            int old_mode = SetBkMode(device_context, TRANSPARENT);
-            DrawTextW(device_context, text != nullptr ? text : L"", -1, &rect, format);
-            SetBkMode(device_context, old_mode);
-            SetTextColor(device_context, old_color);
-            SelectObject(device_context, old_font);
-        }
-
-        void draw_circle(HDC device_context, RECT rect, COLORREF fill, COLORREF border) const
-        {
-            HBRUSH brush = CreateSolidBrush(fill);
-            HPEN pen = CreatePen(PS_SOLID, 1, border);
-            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(device_context, brush));
-            HPEN old_pen = static_cast<HPEN>(SelectObject(device_context, pen));
-            Ellipse(device_context, rect.left, rect.top, rect.right, rect.bottom);
-            SelectObject(device_context, old_pen);
-            SelectObject(device_context, old_brush);
-            DeleteObject(pen);
-            DeleteObject(brush);
         }
 
         int GetClientRectWidth() const
@@ -478,6 +387,19 @@ namespace
         {
             fill_round_rect(device_context, rect, RGB(58, 62, 66), RGB(40, 43, 46), scale_y(3, GetClientRectHeight()));
             draw_text(device_context, m_badge_font, rect, text, DT_CENTER | DT_VCENTER | DT_SINGLELINE, RGB(236, 238, 240));
+        }
+
+        void draw_circle(HDC device_context, RECT rect, COLORREF fill, COLORREF border)
+        {
+            HBRUSH brush = CreateSolidBrush(fill);
+            HPEN pen = CreatePen(PS_SOLID, 1, border);
+            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(device_context, brush));
+            HPEN old_pen = static_cast<HPEN>(SelectObject(device_context, pen));
+            Ellipse(device_context, rect.left, rect.top, rect.right, rect.bottom);
+            SelectObject(device_context, old_pen);
+            SelectObject(device_context, old_brush);
+            DeleteObject(pen);
+            DeleteObject(brush);
         }
 
         void draw_face_badge(HDC device_context, RECT rect, wchar_t letter, COLORREF fill)
@@ -750,7 +672,7 @@ namespace
             int height = client_rect.bottom;
 
             // Fill with pure black (color-key) so the background is transparent.
-            fill_rect(device_context, client_rect, RGB(0, 0, 0));
+            fill_rect(device_context, client_rect, RGB(255, 0, 255));  // magenta color-key for transparency
 
             draw_text(
                 device_context,

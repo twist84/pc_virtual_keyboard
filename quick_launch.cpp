@@ -6,6 +6,11 @@
 #include <string>
 #include <vector>
 
+#include "xbox360_ui_common.h"
+#include "controller_message_box.h"
+#include "config.h"
+#include <shellapi.h>
+
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "msimg32.lib")
@@ -13,11 +18,9 @@
 
 namespace
 {
+    using namespace xbox360_ui;
+
     constexpr wchar_t k_window_class_name[] = L"pc_xbox360_quick_launch";
-
-    constexpr int k_reference_width = 1280;
-    constexpr int k_reference_height = 720;
-
     constexpr int k_panel_left = 320;
     constexpr int k_panel_top = 70;
     constexpr int k_panel_right = 960;
@@ -27,11 +30,6 @@ namespace
     constexpr int k_row_height = 64;
     constexpr int k_visible_rows = 7;
     constexpr int k_list_top = 145;
-
-    constexpr UINT k_controller_timer_id = 1;
-    constexpr UINT k_controller_poll_ms = 16;
-    constexpr SHORT k_stick_deadzone = 7849;
-
     enum class e_game_type
     {
         disc,
@@ -45,35 +43,16 @@ namespace
     {
         std::wstring title;
         e_game_type type = e_game_type::installed;
-        std::wstring last_played;   // e.g. "Today", "Yesterday", "3 days ago"
+        std::wstring last_played;
         int achievements_unlocked = 0;
         int achievements_total = 0;
         bool disc_in_tray = false;
+        std::wstring path;          // executable or file to open
+        std::wstring args;
+        std::wstring working_dir;
+        std::wstring icon_path;     // optional .ico / image; empty = extract from path
+        HICON icon = nullptr;       // loaded at runtime
     };
-
-    int scale_x(int value, int width)
-    {
-        return MulDiv(value, width, k_reference_width);
-    }
-
-    int scale_y(int value, int height)
-    {
-        return MulDiv(value, height, k_reference_height);
-    }
-
-    RECT scale_rect(RECT rect, int width, int height)
-    {
-        return RECT{
-            scale_x(rect.left, width),
-            scale_y(rect.top, height),
-            scale_x(rect.right, width),
-            scale_y(rect.bottom, height)};
-    }
-
-    int round_radius(int width, int height)
-    {
-        return __max(2, scale_y(4, height));
-    }
 
     wchar_t const* type_label(e_game_type t)
     {
@@ -104,21 +83,45 @@ namespace
     public:
         c_quick_launch_window()
         {
-            // Sample library inspired by classic 360 Game Library / Quick Launch
-            m_games = {
-                { L"Halo 3",              e_game_type::disc,      L"Today",          42,  79, true  },
-                { L"Gears of War 2",      e_game_type::installed,  L"Yesterday",      38,  70, false },
-                { L"Left 4 Dead",         e_game_type::installed,  L"2 days ago",     28,  50, false },
-                { L"Castle Crashers",     e_game_type::arcade,     L"3 days ago",     12,  12, false },
-                { L"Geometry Wars 2",     e_game_type::arcade,     L"Last week",      20,  20, false },
-                { L"Braid",               e_game_type::indie,      L"Last week",       8,  12, false },
-                { L"Shadow Complex",      e_game_type::arcade,     L"2 weeks ago",    12,  12, false },
-                { L"Forza Motorsport 3",  e_game_type::installed,  L"2 weeks ago",    35,  50, false },
-                { L"Banjo-Kazooie",       e_game_type::arcade,     L"Last month",     12,  12, false },
-                { L"Trials HD",           e_game_type::arcade,     L"Last month",     18,  18, false },
-                { L"Halo 3: ODST Demo",   e_game_type::demo,       L"Last month",      0,   0, false },
-                { L"A Kingdom for Keflings", e_game_type::indie,   L"Older",           5,  12, false },
+            load_games();
+        }
+
+        void load_games()
+        {
+            m_games.clear();
+            config cfg;
+            if (!cfg.load_beside_exe(L"quick_launch.ini"))
+            {
+                // No config file — leave list empty (user must provide quick_launch.ini)
+                return;
+            }
+
+            auto parse_type = [](std::wstring const& t) -> e_game_type {
+                std::wstring s = t;
+                for (auto& c : s) c = static_cast<wchar_t>(towlower(c));
+                if (s == L"disc") return e_game_type::disc;
+                if (s == L"arcade") return e_game_type::arcade;
+                if (s == L"indie") return e_game_type::indie;
+                if (s == L"demo") return e_game_type::demo;
+                return e_game_type::installed;
             };
+
+            for (auto const& sec : cfg.sections_with_prefix(L"game."))
+            {
+                s_game g;
+                g.title = cfg.get(sec, L"title", L"Unknown");
+                g.type = parse_type(cfg.get(sec, L"type", L"installed"));
+                g.last_played = cfg.get(sec, L"last_played", L"");
+                g.achievements_unlocked = cfg.get_int(sec, L"achievements", 0);
+                g.achievements_total = cfg.get_int(sec, L"achievements_total", 0);
+                g.disc_in_tray = cfg.get_bool(sec, L"disc_in_tray", false);
+                g.path = cfg.get(sec, L"path");
+                g.args = cfg.get(sec, L"args");
+                g.working_dir = cfg.get(sec, L"working_dir");
+                g.icon_path = cfg.get(sec, L"icon");
+                g.icon = load_game_icon(g.icon_path, g.path);
+                m_games.push_back(std::move(g));
+            }
         }
 
         bool create()
@@ -150,7 +153,7 @@ namespace
 
                 if (m_handle != nullptr)
                 {
-                    SetLayeredWindowAttributes(m_handle, RGB(0, 0, 0), 0, LWA_COLORKEY);
+                    SetLayeredWindowAttributes(m_handle, RGB(255, 0, 255), 0, LWA_COLORKEY);
                     create_fonts();
                     ShowWindow(m_handle, SW_SHOW);
                     UpdateWindow(m_handle);
@@ -192,15 +195,6 @@ namespace
         }
 
     private:
-        HFONT make_font(int pixel_height, int weight = FW_NORMAL)
-        {
-            return CreateFontW(
-                pixel_height, 0, 0, 0, weight,
-                FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS,
-                L"Segoe UI");
-        }
 
         void create_fonts()
         {
@@ -237,50 +231,6 @@ namespace
             return r.bottom;
         }
 
-        void fill_rect(HDC dc, RECT rect, COLORREF color) const
-        {
-            HBRUSH brush = CreateSolidBrush(color);
-            FillRect(dc, &rect, brush);
-            DeleteObject(brush);
-        }
-
-        void fill_round_rect(HDC dc, RECT rect, COLORREF fill, COLORREF border, int radius) const
-        {
-            HBRUSH brush = CreateSolidBrush(fill);
-            HPEN pen = CreatePen(PS_SOLID, 1, border);
-            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(dc, brush));
-            HPEN old_pen = static_cast<HPEN>(SelectObject(dc, pen));
-            RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
-            SelectObject(dc, old_brush);
-            SelectObject(dc, old_pen);
-            DeleteObject(pen);
-            DeleteObject(brush);
-        }
-
-        void draw_text(HDC dc, HFONT font, RECT rect, wchar_t const* text, UINT format, COLORREF color) const
-        {
-            HFONT old = static_cast<HFONT>(SelectObject(dc, font));
-            COLORREF old_color = SetTextColor(dc, color);
-            int old_mode = SetBkMode(dc, TRANSPARENT);
-            DrawTextW(dc, text ? text : L"", -1, &rect, format);
-            SetBkMode(dc, old_mode);
-            SetTextColor(dc, old_color);
-            SelectObject(dc, old);
-        }
-
-        void draw_circle(HDC dc, RECT rect, COLORREF fill) const
-        {
-            HBRUSH brush = CreateSolidBrush(fill);
-            HPEN pen = CreatePen(PS_SOLID, 1, fill);
-            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(dc, brush));
-            HPEN old_pen = static_cast<HPEN>(SelectObject(dc, pen));
-            Ellipse(dc, rect.left, rect.top, rect.right, rect.bottom);
-            SelectObject(dc, old_pen);
-            SelectObject(dc, old_brush);
-            DeleteObject(pen);
-            DeleteObject(brush);
-        }
-
         void draw_face_badge(HDC dc, RECT rect, wchar_t letter, COLORREF fill)
         {
             draw_circle(dc, rect, fill);
@@ -288,14 +238,67 @@ namespace
             draw_text(dc, m_badge_font, rect, buf, DT_CENTER | DT_VCENTER | DT_SINGLELINE, RGB(255, 255, 255));
         }
 
-        // Simple box-art placeholder (colored rectangle with initials)
+
+        static HICON load_game_icon(std::wstring const& icon_path, std::wstring const& exe_path)
+        {
+            if (!icon_path.empty())
+            {
+                HICON icon = static_cast<HICON>(LoadImageW(
+                    nullptr, icon_path.c_str(), IMAGE_ICON,
+                    0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
+                if (icon)
+                    return icon;
+            }
+
+            if (exe_path.empty())
+                return nullptr;
+
+            SHFILEINFOW sfi{};
+            if (SHGetFileInfoW(
+                    exe_path.c_str(), 0, &sfi, sizeof(sfi),
+                    SHGFI_ICON | SHGFI_LARGEICON))
+            {
+                return sfi.hIcon;
+            }
+
+            HICON large = nullptr;
+            if (ExtractIconExW(exe_path.c_str(), 0, &large, nullptr, 1) > 0 && large)
+                return large;
+
+            return nullptr;
+        }
+
+        void release_icons()
+        {
+            for (auto& g : m_games)
+            {
+                if (g.icon)
+                {
+                    DestroyIcon(g.icon);
+                    g.icon = nullptr;
+                }
+            }
+        }
+
+        // Box art: file icon when available, else initials
         void draw_box_art(HDC dc, RECT rect, s_game const& game, bool selected)
         {
             COLORREF bg = selected ? RGB(60, 90, 40) : RGB(50, 56, 62);
             COLORREF border = selected ? RGB(120, 170, 60) : RGB(80, 88, 96);
             fill_round_rect(dc, rect, bg, border, scale_y(3, GetClientRectHeight()));
 
-            // Initials from title
+            if (game.icon)
+            {
+                int pad = scale_y(4, GetClientRectHeight());
+                int size = (rect.bottom - rect.top) - pad * 2;
+                if (size < 8) size = 8;
+                int x = rect.left + (rect.right - rect.left - size) / 2;
+                int y = rect.top + pad;
+                DrawIconEx(dc, x, y, game.icon, size, size, 0, nullptr, DI_NORMAL);
+                return;
+            }
+
+            // Initials fallback when no icon
             wchar_t initials[3]{};
             size_t n = 0;
             for (wchar_t c : game.title)
@@ -317,7 +320,7 @@ namespace
             int width = client.right;
             int height = client.bottom;
 
-            fill_rect(dc, client, RGB(0, 0, 0));
+            fill_rect(dc, client, RGB(255, 0, 255));
 
             RECT panel = scale_rect(
                 RECT{ k_panel_left, k_panel_top, k_panel_right, k_panel_bottom },
@@ -488,7 +491,9 @@ namespace
             RECT y_label = footer_y;
             y_label.left = y_badge.right + scale_x(8, width);
             draw_text(dc, m_footer_font, y_label, L"Details", DT_LEFT | DT_VCENTER | DT_SINGLELINE, RGB(230, 232, 234));
-        }
+        
+            m_msgbox.paint(dc, width, height, m_title_font, m_row_font);
+}
 
         void ensure_visible()
         {
@@ -518,8 +523,16 @@ namespace
                 return;
 
             s_game const& g = m_games[m_selected];
-            std::wstring msg = L"Launching:\n" + g.title + L"\n\n(" + type_label(g.type) + L")";
-            MessageBoxW(m_handle, msg.c_str(), L"Quick Launch", MB_OK | MB_ICONINFORMATION);
+            if (g.path.empty() || !launch_process(g.path, g.args, g.working_dir))
+            {
+                m_msgbox.show(
+                    L"Quick Launch",
+                    L"Failed to launch:\n" + g.title +
+                    (g.path.empty() ? L"" : (L"\n\n" + g.path)),
+                    controller_message_box::buttons::ok,
+                    L"A  OK");
+                InvalidateRect(m_handle, nullptr, FALSE);
+            }
         }
 
         void show_details()
@@ -537,11 +550,31 @@ namespace
                 g.achievements_unlocked,
                 g.achievements_total,
                 g.disc_in_tray ? L"\nDisc in tray" : L"");
-            MessageBoxW(m_handle, buf, L"Game Details", MB_OK | MB_ICONINFORMATION);
+            m_msgbox.show(
+                    L"Game Details",
+                    buf,
+                    controller_message_box::buttons::ok,
+                    L"A  OK");
+                InvalidateRect(m_handle, nullptr, FALSE);
         }
 
         void poll_controller()
         {
+            if (m_msgbox.visible())
+            {
+                XINPUT_STATE st{};
+                if (XInputGetState(0, &st) == ERROR_SUCCESS)
+                {
+                    WORD buttons = st.Gamepad.wButtons;
+                    static WORD s_prev = 0;
+                    WORD pressed = static_cast<WORD>(buttons & ~s_prev);
+                    s_prev = buttons;
+                    if (m_msgbox.handle_controller(pressed, st.Gamepad.sThumbLX, GetTickCount()))
+                        InvalidateRect(m_handle, nullptr, FALSE);
+                }
+                return;
+            }
+
             XINPUT_STATE state{};
             if (XInputGetState(0, &state) != ERROR_SUCCESS)
             {
@@ -607,6 +640,12 @@ namespace
                 return TRUE;
 
             case WM_KEYDOWN:
+                if (m_msgbox.visible())
+                {
+                    if (m_msgbox.handle_key(w_param))
+                        InvalidateRect(m_handle, nullptr, FALSE);
+                    return 0;
+                }
                 switch (w_param)
                 {
                 case VK_ESCAPE:
@@ -682,6 +721,7 @@ namespace
 
             case WM_NCDESTROY:
                 KillTimer(m_handle, k_controller_timer_id);
+                release_icons();
                 release_fonts();
                 return 0;
             }
@@ -700,6 +740,8 @@ namespace
         std::vector<s_game> m_games;
         int m_selected = 0;
         int m_scroll_offset = 0;
+        controller_message_box m_msgbox;
+
         WORD m_previous_buttons = 0;
         DWORD m_last_nav_time = 0;
     };

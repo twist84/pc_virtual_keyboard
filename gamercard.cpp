@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+#include "xbox360_ui_common.h"
+#include "config.h"
+
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "msimg32.lib")
@@ -12,49 +15,19 @@
 
 namespace
 {
+    using namespace xbox360_ui;
+
     constexpr wchar_t k_window_class_name[] = L"pc_xbox360_gamercard";
-
-    constexpr int k_reference_width = 1280;
-    constexpr int k_reference_height = 720;
-
     constexpr int k_panel_left = 300;
     constexpr int k_panel_top = 60;
     constexpr int k_panel_right = 980;
     constexpr int k_panel_bottom = 640;
-
-    constexpr UINT k_controller_timer_id = 1;
-    constexpr UINT k_controller_poll_ms = 16;
-
     struct s_achievement
     {
         std::wstring name;
         std::wstring game;
         int gamerscore = 0;
     };
-
-    int scale_x(int value, int width)
-    {
-        return MulDiv(value, width, k_reference_width);
-    }
-
-    int scale_y(int value, int height)
-    {
-        return MulDiv(value, height, k_reference_height);
-    }
-
-    RECT scale_rect(RECT rect, int width, int height)
-    {
-        return RECT{
-            scale_x(rect.left, width),
-            scale_y(rect.top, height),
-            scale_x(rect.right, width),
-            scale_y(rect.bottom, height)};
-    }
-
-    int round_radius(int width, int height)
-    {
-        return __max(2, scale_y(4, height));
-    }
 
     class c_gamercard_window
     {
@@ -78,6 +51,33 @@ namespace
                 { L"Zombie Genocide Master", L"Left 4 Dead",       50 },
                 { L"The Final Showdown",     L"Castle Crashers",   15 },
             };
+
+            config cfg;
+            if (cfg.load_beside_exe(L"gamercard.ini"))
+            {
+                m_gamertag = cfg.get(L"profile", L"gamertag", m_gamertag);
+                m_motto = cfg.get(L"profile", L"motto", m_motto);
+                m_location = cfg.get(L"profile", L"location", m_location);
+                m_bio = cfg.get(L"profile", L"bio", m_bio);
+                m_gamerscore = cfg.get_int(L"profile", L"gamerscore", m_gamerscore);
+                m_reputation = cfg.get(L"profile", L"reputation", m_reputation);
+                m_zone = cfg.get(L"profile", L"zone", m_zone);
+                m_member_since = cfg.get(L"profile", L"member_since", m_member_since);
+                m_games_played = cfg.get_int(L"profile", L"games_played", m_games_played);
+                auto ach = cfg.sections_with_prefix(L"achievement.");
+                if (!ach.empty())
+                {
+                    m_recent.clear();
+                    for (auto const& sec : ach)
+                    {
+                        s_achievement a;
+                        a.name = cfg.get(sec, L"name");
+                        a.game = cfg.get(sec, L"game");
+                        a.gamerscore = cfg.get_int(sec, L"gamerscore");
+                        m_recent.push_back(std::move(a));
+                    }
+                }
+            }
         }
 
         bool create()
@@ -109,7 +109,7 @@ namespace
 
                 if (m_handle != nullptr)
                 {
-                    SetLayeredWindowAttributes(m_handle, RGB(0, 0, 0), 0, LWA_COLORKEY);
+                    SetLayeredWindowAttributes(m_handle, RGB(255, 0, 255), 0, LWA_COLORKEY);
                     create_fonts();
                     ShowWindow(m_handle, SW_SHOW);
                     UpdateWindow(m_handle);
@@ -151,15 +151,6 @@ namespace
         }
 
     private:
-        HFONT make_font(int pixel_height, int weight = FW_NORMAL)
-        {
-            return CreateFontW(
-                pixel_height, 0, 0, 0, weight,
-                FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS,
-                L"Segoe UI");
-        }
 
         void create_fonts()
         {
@@ -198,50 +189,6 @@ namespace
             return r.bottom;
         }
 
-        void fill_rect(HDC dc, RECT rect, COLORREF color) const
-        {
-            HBRUSH brush = CreateSolidBrush(color);
-            FillRect(dc, &rect, brush);
-            DeleteObject(brush);
-        }
-
-        void fill_round_rect(HDC dc, RECT rect, COLORREF fill, COLORREF border, int radius) const
-        {
-            HBRUSH brush = CreateSolidBrush(fill);
-            HPEN pen = CreatePen(PS_SOLID, 1, border);
-            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(dc, brush));
-            HPEN old_pen = static_cast<HPEN>(SelectObject(dc, pen));
-            RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
-            SelectObject(dc, old_brush);
-            SelectObject(dc, old_pen);
-            DeleteObject(pen);
-            DeleteObject(brush);
-        }
-
-        void draw_text(HDC dc, HFONT font, RECT rect, wchar_t const* text, UINT format, COLORREF color) const
-        {
-            HFONT old = static_cast<HFONT>(SelectObject(dc, font));
-            COLORREF old_color = SetTextColor(dc, color);
-            int old_mode = SetBkMode(dc, TRANSPARENT);
-            DrawTextW(dc, text ? text : L"", -1, &rect, format);
-            SetBkMode(dc, old_mode);
-            SetTextColor(dc, old_color);
-            SelectObject(dc, old);
-        }
-
-        void draw_circle(HDC dc, RECT rect, COLORREF fill) const
-        {
-            HBRUSH brush = CreateSolidBrush(fill);
-            HPEN pen = CreatePen(PS_SOLID, 1, fill);
-            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(dc, brush));
-            HPEN old_pen = static_cast<HPEN>(SelectObject(dc, pen));
-            Ellipse(dc, rect.left, rect.top, rect.right, rect.bottom);
-            SelectObject(dc, old_pen);
-            SelectObject(dc, old_brush);
-            DeleteObject(pen);
-            DeleteObject(brush);
-        }
-
         void draw_face_badge(HDC dc, RECT rect, wchar_t letter, COLORREF fill)
         {
             draw_circle(dc, rect, fill);
@@ -275,7 +222,7 @@ namespace
             int width = client.right;
             int height = client.bottom;
 
-            fill_rect(dc, client, RGB(0, 0, 0));
+            fill_rect(dc, client, RGB(255, 0, 255));
 
             RECT panel = scale_rect(
                 RECT{ k_panel_left, k_panel_top, k_panel_right, k_panel_bottom },

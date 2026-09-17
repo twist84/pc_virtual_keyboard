@@ -6,6 +6,10 @@
 #include <string>
 #include <vector>
 
+#include "xbox360_ui_common.h"
+#include "controller_message_box.h"
+#include "config.h"
+
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "msimg32.lib")
@@ -13,11 +17,9 @@
 
 namespace
 {
+    using namespace xbox360_ui;
+
     constexpr wchar_t k_window_class_name[] = L"pc_xbox360_friends_list";
-
-    constexpr int k_reference_width = 1280;
-    constexpr int k_reference_height = 720;
-
     // Panel roughly matching NXE Guide friends blade proportions
     constexpr int k_panel_left = 340;
     constexpr int k_panel_top = 80;
@@ -29,51 +31,14 @@ namespace
     constexpr int k_visible_rows = 8;
     constexpr int k_list_top = 150;
     constexpr int k_list_bottom = 560;
-
-    constexpr UINT k_controller_timer_id = 1;
-    constexpr UINT k_controller_poll_ms = 16;
-    constexpr SHORT k_stick_deadzone = 7849;
-
-    enum class e_presence
-    {
-        online,
-        away,
-        busy,
-        offline
-    };
-
     struct s_friend
     {
         std::wstring gamertag;
-        e_presence presence = e_presence::offline;
+        presence presence_state = presence::offline;
         std::wstring status;   // e.g. "Playing Halo 3" or "Online"
         int gamerscore = 0;
         bool favorite = false;
     };
-
-    int scale_x(int value, int width)
-    {
-        return MulDiv(value, width, k_reference_width);
-    }
-
-    int scale_y(int value, int height)
-    {
-        return MulDiv(value, height, k_reference_height);
-    }
-
-    RECT scale_rect(RECT rect, int width, int height)
-    {
-        return RECT{
-            scale_x(rect.left, width),
-            scale_y(rect.top, height),
-            scale_x(rect.right, width),
-            scale_y(rect.bottom, height)};
-    }
-
-    int round_radius(int width, int height)
-    {
-        return __max(2, scale_y(4, height));
-    }
 
     class c_friends_list_window
     {
@@ -81,33 +46,46 @@ namespace
         c_friends_list_window()
         {
             // Sample data inspired by classic NXE / Guide friends list
-            m_friends = {
-                { L"MajorNelson",   e_presence::online,  L"Playing Gears of War 2", 125480, true  },
-                { L"LarryHryb",     e_presence::online,  L"Playing Halo 3",          98210, true  },
-                { L"Rareware",      e_presence::online,  L"Online",                  45600, false },
-                { L"Bungie",        e_presence::away,    L"Away",                    87300, false },
-                { L"EpicGames",     e_presence::busy,    L"Busy",                    112000, false },
-                { L"Twister",       e_presence::online,  L"Playing Left 4 Dead",     34200, true  },
-                { L"MasterChief",   e_presence::offline, L"Offline",                 250000, false },
-                { L"Cortana",       e_presence::offline, L"Last seen 2 hours ago",   18900, false },
-                { L"Arbiter",       e_presence::offline, L"Offline",                 67000, false },
-                { L"SgtJohnson",    e_presence::offline, L"Last seen yesterday",     44100, false },
-                { L"ODST",          e_presence::offline, L"Offline",                 22800, false },
-                { L"ForgeMaster",   e_presence::offline, L"Offline",                 15600, false },
-            };
+            config cfg;
+            if (cfg.load_beside_exe(L"friends_list.ini"))
+            {
+                auto parse_pres = [](std::wstring t) {
+                    for (auto& c : t) c = static_cast<wchar_t>(towlower(c));
+                    if (t == L"online") return presence::online;
+                    if (t == L"away") return presence::away;
+                    if (t == L"busy") return presence::busy;
+                    return presence::offline;
+                };
+                for (auto const& sec : cfg.sections_with_prefix(L"friend."))
+                {
+                    s_friend f;
+                    f.gamertag = cfg.get(sec, L"gamertag", L"Unknown");
+                    f.presence_state = parse_pres(cfg.get(sec, L"presence", L"offline"));
+                    f.status = cfg.get(sec, L"status");
+                    f.gamerscore = cfg.get_int(sec, L"gamerscore");
+                    f.favorite = cfg.get_bool(sec, L"favorite");
+                    m_friends.push_back(std::move(f));
+                }
+            }
+            if (m_friends.empty())
+            {
+                m_friends = {
+                    { L"MajorNelson", presence::online, L"Online", 1000, true },
+                };
+            }
 
             // Online / away / busy first, then offline
             std::stable_sort(m_friends.begin(), m_friends.end(),
                 [](s_friend const& a, s_friend const& b) {
-                    auto rank = [](e_presence p) {
+                    auto rank = [](presence p) {
                         switch (p) {
-                        case e_presence::online: return 0;
-                        case e_presence::away:   return 1;
-                        case e_presence::busy:   return 2;
+                        case presence::online: return 0;
+                        case presence::away:   return 1;
+                        case presence::busy:   return 2;
                         default:                 return 3;
                         }
                     };
-                    int ra = rank(a.presence), rb = rank(b.presence);
+                    int ra = rank(a.presence_state), rb = rank(b.presence_state);
                     if (ra != rb) return ra < rb;
                     if (a.favorite != b.favorite) return a.favorite > b.favorite;
                     return a.gamertag < b.gamertag;
@@ -143,7 +121,7 @@ namespace
 
                 if (m_handle != nullptr)
                 {
-                    SetLayeredWindowAttributes(m_handle, RGB(0, 0, 0), 0, LWA_COLORKEY);
+                    SetLayeredWindowAttributes(m_handle, RGB(255, 0, 255), 0, LWA_COLORKEY);
                     create_fonts();
                     ShowWindow(m_handle, SW_SHOW);
                     UpdateWindow(m_handle);
@@ -185,15 +163,6 @@ namespace
         }
 
     private:
-        HFONT make_font(int pixel_height, int weight = FW_NORMAL)
-        {
-            return CreateFontW(
-                pixel_height, 0, 0, 0, weight,
-                FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS,
-                L"Segoe UI");
-        }
 
         void create_fonts()
         {
@@ -238,66 +207,11 @@ namespace
             return scale_rect(rect, client.right, client.bottom);
         }
 
-        void fill_rect(HDC dc, RECT rect, COLORREF color) const
-        {
-            HBRUSH brush = CreateSolidBrush(color);
-            FillRect(dc, &rect, brush);
-            DeleteObject(brush);
-        }
-
-        void fill_round_rect(HDC dc, RECT rect, COLORREF fill, COLORREF border, int radius) const
-        {
-            HBRUSH brush = CreateSolidBrush(fill);
-            HPEN pen = CreatePen(PS_SOLID, 1, border);
-            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(dc, brush));
-            HPEN old_pen = static_cast<HPEN>(SelectObject(dc, pen));
-            RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
-            SelectObject(dc, old_brush);
-            SelectObject(dc, old_pen);
-            DeleteObject(pen);
-            DeleteObject(brush);
-        }
-
-        void draw_text(HDC dc, HFONT font, RECT rect, wchar_t const* text, UINT format, COLORREF color) const
-        {
-            HFONT old = static_cast<HFONT>(SelectObject(dc, font));
-            COLORREF old_color = SetTextColor(dc, color);
-            int old_mode = SetBkMode(dc, TRANSPARENT);
-            DrawTextW(dc, text ? text : L"", -1, &rect, format);
-            SetBkMode(dc, old_mode);
-            SetTextColor(dc, old_color);
-            SelectObject(dc, old);
-        }
-
-        void draw_circle(HDC dc, RECT rect, COLORREF fill) const
-        {
-            HBRUSH brush = CreateSolidBrush(fill);
-            HPEN pen = CreatePen(PS_SOLID, 1, fill);
-            HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(dc, brush));
-            HPEN old_pen = static_cast<HPEN>(SelectObject(dc, pen));
-            Ellipse(dc, rect.left, rect.top, rect.right, rect.bottom);
-            SelectObject(dc, old_pen);
-            SelectObject(dc, old_brush);
-            DeleteObject(pen);
-            DeleteObject(brush);
-        }
-
         void draw_face_badge(HDC dc, RECT rect, wchar_t letter, COLORREF fill)
         {
             draw_circle(dc, rect, fill);
             wchar_t buf[2]{ letter, L'\0' };
             draw_text(dc, m_badge_font, rect, buf, DT_CENTER | DT_VCENTER | DT_SINGLELINE, RGB(255, 255, 255));
-        }
-
-        COLORREF presence_color(e_presence p) const
-        {
-            switch (p)
-            {
-            case e_presence::online: return RGB(90, 176, 54);   // green
-            case e_presence::away:   return RGB(214, 161, 28);  // yellow
-            case e_presence::busy:   return RGB(196, 58, 48);   // red
-            default:                 return RGB(120, 124, 128); // grey
-            }
         }
 
         void paint(HDC dc)
@@ -307,8 +221,8 @@ namespace
             int width = client.right;
             int height = client.bottom;
 
-            // Fill with pure black (color-key) so the background is transparent.
-            fill_rect(dc, client, RGB(0, 0, 0));
+            // Magenta color-key background
+            fill_rect(dc, client, RGB(255, 0, 255));
 
             // Main panel
             RECT panel = scale_rect(
@@ -329,7 +243,7 @@ namespace
             // Online count on the right of header
             int online_count = 0;
             for (auto const& f : m_friends)
-                if (f.presence == e_presence::online || f.presence == e_presence::away || f.presence == e_presence::busy)
+                if (f.presence_state == presence::online || f.presence_state == presence::away || f.presence_state == presence::busy)
                     ++online_count;
 
             wchar_t count_buf[64];
@@ -368,7 +282,7 @@ namespace
                     row.left + scale_x(14, width) + dot_size,
                     row.top + (row.bottom - row.top - dot_size) / 2 + dot_size
                 };
-                draw_circle(dc, dot, presence_color(f.presence));
+                draw_circle(dc, dot, presence_color(f.presence_state));
 
                 // Gamertag
                 RECT tag_rect{
@@ -496,7 +410,9 @@ namespace
             RECT b_label = footer_b;
             b_label.left = b_badge.right + scale_x(8, width);
             draw_text(dc, m_footer_font, b_label, L"Back", DT_LEFT | DT_VCENTER | DT_SINGLELINE, RGB(230, 232, 234));
-        }
+        
+            m_msgbox.paint(dc, width, height, m_title_font, m_row_font);
+}
 
         void ensure_visible()
         {
@@ -527,15 +443,32 @@ namespace
             if (m_selected >= 0 && m_selected < static_cast<int>(m_friends.size()))
             {
                 // Flash selection or show a simple message box for demo
-                MessageBoxW(m_handle,
-                    (L"Selected: " + m_friends[m_selected].gamertag + L"\n" + m_friends[m_selected].status).c_str(),
+                m_msgbox.show(
                     L"Friend Options",
-                    MB_OK | MB_ICONINFORMATION);
+                    (L"Selected: " + m_friends[m_selected].gamertag + L"\n" + m_friends[m_selected].status).c_str(),
+                    controller_message_box::buttons::ok,
+                    L"A  OK");
+                InvalidateRect(m_handle, nullptr, FALSE);
             }
         }
 
         void poll_controller()
         {
+            if (m_msgbox.visible())
+            {
+                XINPUT_STATE st{};
+                if (XInputGetState(0, &st) == ERROR_SUCCESS)
+                {
+                    WORD buttons = st.Gamepad.wButtons;
+                    static WORD s_prev = 0;
+                    WORD pressed = static_cast<WORD>(buttons & ~s_prev);
+                    s_prev = buttons;
+                    if (m_msgbox.handle_controller(pressed, st.Gamepad.sThumbLX, GetTickCount()))
+                        InvalidateRect(m_handle, nullptr, FALSE);
+                }
+                return;
+            }
+
             XINPUT_STATE state{};
             if (XInputGetState(0, &state) != ERROR_SUCCESS)
             {
@@ -608,6 +541,12 @@ namespace
                 return TRUE;
 
             case WM_KEYDOWN:
+                if (m_msgbox.visible())
+                {
+                    if (m_msgbox.handle_key(w_param))
+                        InvalidateRect(m_handle, nullptr, FALSE);
+                    return 0;
+                }
                 switch (w_param)
                 {
                 case VK_ESCAPE:
@@ -707,6 +646,8 @@ namespace
         std::vector<s_friend> m_friends;
         int m_selected = 0;
         int m_scroll_offset = 0;
+        controller_message_box m_msgbox;
+
         WORD m_previous_buttons = 0;
         DWORD m_last_nav_time = 0;
     };

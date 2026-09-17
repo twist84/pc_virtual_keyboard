@@ -119,6 +119,61 @@ Sample friends data is hard-coded for demonstration. In a real integration you w
 - **Messages → A → Reply** opens the virtual keyboard to compose a reply
 - **Left / Right** also switch focus blade <-> content
 
+
+## Shared library
+
+Common drawing, scaling, fonts, and overlay window helpers live in a static library:
+
+- `xbox360_ui_common.h` / `xbox360_ui_common.cpp` → **libxbox360_ui_common**
+- Reference resolution 1280×720, color-key magenta, GDI primitives, presence colors, footer buttons
+
+All panel executables and `pc_guide` link against it.
+
+
+## Configuration
+
+Each app loads an **INI file** from the same folder as the executable:
+
+| File | App |
+|------|-----|
+| `quick_launch.ini` | Quick Launch + Guide games |
+| `friends_list.ini` | Friends |
+| `party.ini` | Party |
+| `players_met.ini` | Players Met |
+| `message_center.ini` | Message Center |
+| `gamercard.ini` | Gamercard / profile |
+| `guide.ini` | Guide options |
+
+### Quick Launch — real launches
+
+```ini
+[game.0]
+title=Halo 3
+type=disc
+path=D:\Games\Halo3\halo3.exe
+args=
+last_played=Today
+achievements=42
+achievements_total=79
+disc_in_tray=1
+```
+
+**A** on a game runs `path` via `CreateProcess`.  
+Set each `path=` to your game install. Empty or invalid paths show **Failed to launch**.
+
+CMake copies all `config/*.ini` into `build/vs2026-x64/Release` and `Debug`.
+
+## Guide button / hotkey listener
+
+`pc_guide_listener.exe` is a background process (no window) that opens the Guide when:
+
+| Input | Action |
+|-------|--------|
+| **Guide (Xbox) button** | Launch / focus Guide — via undocumented `XInputGetStateEx` when the driver supports it |
+| **Start + Back** | Always works with standard XInput |
+
+Put it in the **same folder** as `pc_guide.exe` and run it at login (or from a shortcut). Only one instance runs at a time. If the Guide is already open, it is focused instead of starting a second copy.
+
 ## Building
 
 ### Requirements
@@ -207,6 +262,8 @@ All coordinates are defined against a **1280 × 720** reference resolution and s
 ├── party.cpp                          # Party
 ├── players_met.cpp                    # Players Met
 ├── message_center.cpp                 # Message Center
+├── xbox360_ui_common.h / .cpp          # Shared static library
+├── controller_message_box.h / .cpp     # Controller-friendly modal dialog
 ├── guide.cpp                          # Unified Guide (all sections)
 ├── build-vs2026.bat
 └── README.md

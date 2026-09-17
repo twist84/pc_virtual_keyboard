@@ -7,6 +7,11 @@
 #include <vector>
 
 #include "virtual_keyboard.h"
+#include "controller_message_box.h"
+#include "config.h"
+#include <shellapi.h>
+
+#include "xbox360_ui_common.h"
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -15,13 +20,9 @@
 
 namespace
 {
-    constexpr wchar_t k_window_class_name[] = L"pc_xbox360_guide";
-    constexpr int k_reference_width = 1280;
-    constexpr int k_reference_height = 720;
-    constexpr UINT k_controller_timer_id = 1;
-    constexpr UINT k_controller_poll_ms = 16;
-    constexpr SHORT k_stick_deadzone = 7849;
+    using namespace xbox360_ui;
 
+    constexpr wchar_t k_window_class_name[] = L"pc_xbox360_guide";
     // Guide sections (left blade)
     enum class e_section
     {
@@ -51,11 +52,9 @@ namespace
     }
 
     // --- Shared data models ---
-    enum class e_presence { online, away, busy, offline };
-
     struct s_friend {
         std::wstring gamertag;
-        e_presence presence = e_presence::offline;
+        presence presence_state = presence::offline;
         std::wstring status;
         int gamerscore = 0;
         bool favorite = false;
@@ -81,7 +80,7 @@ namespace
 
     struct s_player {
         std::wstring gamertag;
-        e_presence presence = e_presence::offline;
+        presence presence_state = presence::offline;
         std::wstring game_met;
         std::wstring when_met;
         bool is_friend = false;
@@ -96,6 +95,11 @@ namespace
         int achievements_unlocked = 0;
         int achievements_total = 0;
         bool disc_in_tray = false;
+        std::wstring path;
+        std::wstring args;
+        std::wstring working_dir;
+        std::wstring icon_path;
+        HICON icon = nullptr;
     };
 
     struct s_achievement {
@@ -103,23 +107,6 @@ namespace
         std::wstring game;
         int gamerscore = 0;
     };
-
-    // --- Scaling helpers ---
-    int scale_x(int v, int w) { return MulDiv(v, w, k_reference_width); }
-    int scale_y(int v, int h) { return MulDiv(v, h, k_reference_height); }
-    RECT scale_rect(RECT r, int w, int h) {
-        return RECT{ scale_x(r.left, w), scale_y(r.top, h), scale_x(r.right, w), scale_y(r.bottom, h) };
-    }
-    int round_radius(int w, int h) { return __max(2, scale_y(4, h)); }
-
-    COLORREF presence_color(e_presence p) {
-        switch (p) {
-        case e_presence::online: return RGB(90, 176, 54);
-        case e_presence::away:   return RGB(214, 161, 28);
-        case e_presence::busy:   return RGB(196, 58, 48);
-        default:                 return RGB(120, 124, 128);
-        }
-    }
 
     wchar_t const* msg_type_label(e_msg_type t) {
         switch (t) {
@@ -152,6 +139,25 @@ namespace
         }
     }
 
+
+    static HICON load_game_icon(std::wstring const& icon_path, std::wstring const& exe_path)
+    {
+        if (!icon_path.empty())
+        {
+            HICON icon = static_cast<HICON>(LoadImageW(
+                nullptr, icon_path.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE));
+            if (icon) return icon;
+        }
+        if (exe_path.empty()) return nullptr;
+        SHFILEINFOW sfi{};
+        if (SHGetFileInfoW(exe_path.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_LARGEICON))
+            return sfi.hIcon;
+        HICON large = nullptr;
+        if (ExtractIconExW(exe_path.c_str(), 0, &large, nullptr, 1) > 0 && large)
+            return large;
+        return nullptr;
+    }
+
     class c_guide_window
     {
     public:
@@ -159,14 +165,14 @@ namespace
         {
             // Friends
             m_friends = {
-                { L"MajorNelson", e_presence::online, L"Playing Gears of War 2", 125480, true },
-                { L"LarryHryb",   e_presence::online, L"Playing Halo 3", 98210, true },
-                { L"Twister",     e_presence::online, L"Playing Left 4 Dead", 34200, true },
-                { L"Rareware",    e_presence::online, L"Online", 45600, false },
-                { L"Bungie",      e_presence::away,   L"Away", 87300, false },
-                { L"EpicGames",   e_presence::busy,   L"Busy", 112000, false },
-                { L"Arbiter",     e_presence::offline, L"Offline", 67000, false },
-                { L"Cortana",     e_presence::offline, L"Last seen 2 hours ago", 18900, false },
+                { L"MajorNelson", presence::online, L"Playing Gears of War 2", 125480, true },
+                { L"LarryHryb",   presence::online, L"Playing Halo 3", 98210, true },
+                { L"Twister",     presence::online, L"Playing Left 4 Dead", 34200, true },
+                { L"Rareware",    presence::online, L"Online", 45600, false },
+                { L"Bungie",      presence::away,   L"Away", 87300, false },
+                { L"EpicGames",   presence::busy,   L"Busy", 112000, false },
+                { L"Arbiter",     presence::offline, L"Offline", 67000, false },
+                { L"Cortana",     presence::offline, L"Last seen 2 hours ago", 18900, false },
             };
 
             // Messages
@@ -191,25 +197,47 @@ namespace
 
             // Players met
             m_players = {
-                { L"Spartan117", e_presence::online, L"Halo 3", L"Today", false, false },
-                { L"MarcusFenix", e_presence::online, L"Gears of War 2", L"Today", false, false },
-                { L"Zoey", e_presence::away, L"Left 4 Dead", L"Yesterday", true, false },
-                { L"Bill", e_presence::offline, L"Left 4 Dead", L"Yesterday", false, false },
-                { L"Francis", e_presence::offline, L"Left 4 Dead", L"Yesterday", false, true },
-                { L"BlueKnight", e_presence::online, L"Castle Crashers", L"2 days ago", false, false },
-                { L"DriftKing", e_presence::offline, L"Forza Motorsport 3", L"Last week", false, false },
+                { L"Spartan117", presence::online, L"Halo 3", L"Today", false, false },
+                { L"MarcusFenix", presence::online, L"Gears of War 2", L"Today", false, false },
+                { L"Zoey", presence::away, L"Left 4 Dead", L"Yesterday", true, false },
+                { L"Bill", presence::offline, L"Left 4 Dead", L"Yesterday", false, false },
+                { L"Francis", presence::offline, L"Left 4 Dead", L"Yesterday", false, true },
+                { L"BlueKnight", presence::online, L"Castle Crashers", L"2 days ago", false, false },
+                { L"DriftKing", presence::offline, L"Forza Motorsport 3", L"Last week", false, false },
             };
 
-            // Games
-            m_games = {
-                { L"Halo 3", e_game_type::disc, L"Today", 42, 79, true },
-                { L"Gears of War 2", e_game_type::installed, L"Yesterday", 38, 70, false },
-                { L"Left 4 Dead", e_game_type::installed, L"2 days ago", 28, 50, false },
-                { L"Castle Crashers", e_game_type::arcade, L"3 days ago", 12, 12, false },
-                { L"Geometry Wars 2", e_game_type::arcade, L"Last week", 20, 20, false },
-                { L"Braid", e_game_type::indie, L"Last week", 8, 12, false },
-                { L"Shadow Complex", e_game_type::arcade, L"2 weeks ago", 12, 12, false },
-            };
+            // Games from quick_launch.ini
+            {
+                config cfg;
+                if (cfg.load_beside_exe(L"quick_launch.ini"))
+                {
+                    auto parse_type = [](std::wstring t) {
+                        for (auto& c : t) c = static_cast<wchar_t>(towlower(c));
+                        if (t == L"disc") return e_game_type::disc;
+                        if (t == L"arcade") return e_game_type::arcade;
+                        if (t == L"indie") return e_game_type::indie;
+                        if (t == L"demo") return e_game_type::demo;
+                        return e_game_type::installed;
+                    };
+                    for (auto const& sec : cfg.sections_with_prefix(L"game."))
+                    {
+                        s_game g;
+                        g.title = cfg.get(sec, L"title", L"Unknown");
+                        g.type = parse_type(cfg.get(sec, L"type", L"installed"));
+                        g.last_played = cfg.get(sec, L"last_played");
+                        g.achievements_unlocked = cfg.get_int(sec, L"achievements");
+                        g.achievements_total = cfg.get_int(sec, L"achievements_total");
+                        g.disc_in_tray = cfg.get_bool(sec, L"disc_in_tray");
+                        g.path = cfg.get(sec, L"path");
+                        g.args = cfg.get(sec, L"args");
+                        g.working_dir = cfg.get(sec, L"working_dir");
+                        g.icon_path = cfg.get(sec, L"icon");
+                        g.icon = load_game_icon(g.icon_path, g.path);
+                        m_games.push_back(std::move(g));
+                    }
+                }
+                // If config missing or empty, games list stays empty
+            }
 
             // Profile
             m_gamertag = L"Twister";
@@ -252,7 +280,7 @@ namespace
 
             if (!m_handle) return false;
 
-            SetLayeredWindowAttributes(m_handle, RGB(0, 0, 0), 0, LWA_COLORKEY);
+            SetLayeredWindowAttributes(m_handle, RGB(255, 0, 255), 0, LWA_COLORKEY);
             create_fonts();
             ShowWindow(m_handle, SW_SHOW);
             UpdateWindow(m_handle);
@@ -280,11 +308,6 @@ namespace
 
     private:
         // --- Drawing primitives ---
-        HFONT make_font(int h, int weight = FW_NORMAL) {
-            return CreateFontW(h, 0, 0, 0, weight, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        }
 
         void create_fonts() {
             int h = client_h();
@@ -304,38 +327,6 @@ namespace
 
         int client_w() const { RECT r{}; GetClientRect(m_handle, &r); return r.right; }
         int client_h() const { RECT r{}; GetClientRect(m_handle, &r); return r.bottom; }
-
-        void fill_rect(HDC dc, RECT r, COLORREF c) const {
-            HBRUSH b = CreateSolidBrush(c); FillRect(dc, &r, b); DeleteObject(b);
-        }
-
-        void fill_round_rect(HDC dc, RECT r, COLORREF fill, COLORREF border, int radius) const {
-            HBRUSH b = CreateSolidBrush(fill);
-            HPEN p = CreatePen(PS_SOLID, 1, border);
-            auto ob = static_cast<HBRUSH>(SelectObject(dc, b));
-            auto op = static_cast<HPEN>(SelectObject(dc, p));
-            RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
-            SelectObject(dc, ob); SelectObject(dc, op);
-            DeleteObject(p); DeleteObject(b);
-        }
-
-        void draw_text(HDC dc, HFONT font, RECT r, wchar_t const* text, UINT fmt, COLORREF color) const {
-            auto old = static_cast<HFONT>(SelectObject(dc, font));
-            COLORREF oc = SetTextColor(dc, color);
-            int om = SetBkMode(dc, TRANSPARENT);
-            DrawTextW(dc, text ? text : L"", -1, &r, fmt);
-            SetBkMode(dc, om); SetTextColor(dc, oc); SelectObject(dc, old);
-        }
-
-        void draw_circle(HDC dc, RECT r, COLORREF fill) const {
-            HBRUSH b = CreateSolidBrush(fill);
-            HPEN p = CreatePen(PS_SOLID, 1, fill);
-            auto ob = static_cast<HBRUSH>(SelectObject(dc, b));
-            auto op = static_cast<HPEN>(SelectObject(dc, p));
-            Ellipse(dc, r.left, r.top, r.right, r.bottom);
-            SelectObject(dc, op); SelectObject(dc, ob);
-            DeleteObject(p); DeleteObject(b);
-        }
 
         void draw_face_badge(HDC dc, RECT r, wchar_t letter, COLORREF fill) {
             draw_circle(dc, r, fill);
@@ -406,7 +397,7 @@ namespace
             // Summary cards
             int online = 0;
             for (auto const& f : m_friends)
-                if (f.presence == e_presence::online || f.presence == e_presence::away || f.presence == e_presence::busy) ++online;
+                if (f.presence_state == presence::online || f.presence_state == presence::away || f.presence_state == presence::busy) ++online;
             int unread = 0;
             for (auto const& m : m_messages) if (m.unread) ++unread;
             int party_n = 0;
@@ -468,7 +459,7 @@ namespace
         {
             int online = 0;
             for (auto const& f : m_friends)
-                if (f.presence != e_presence::offline) ++online;
+                if (f.presence_state != presence::offline) ++online;
             wchar_t right[32]; swprintf_s(right, L"%d Online", online);
             paint_list_header(dc, content, w, h, L"Friends", right);
 
@@ -489,7 +480,7 @@ namespace
                 int ds = scale_y(11, h);
                 RECT dot{ row.left + scale_x(12, w), row.top + (row.bottom - row.top - ds) / 2,
                           row.left + scale_x(12, w) + ds, row.top + (row.bottom - row.top - ds) / 2 + ds };
-                draw_circle(dc, dot, presence_color(f.presence));
+                draw_circle(dc, dot, presence_color(f.presence_state));
 
                 RECT tag{ row.left + scale_x(32, w), row.top, row.right - scale_x(100, w), row.top + (row.bottom - row.top) * 3 / 5 };
                 draw_text(dc, m_row_font, tag, f.gamertag.c_str(), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
@@ -626,7 +617,7 @@ namespace
                 int ds = scale_y(11, h);
                 RECT dot{ row.left + scale_x(12, w), row.top + (row.bottom - row.top - ds) / 2,
                           row.left + scale_x(12, w) + ds, row.top + (row.bottom - row.top - ds) / 2 + ds };
-                draw_circle(dc, dot, presence_color(p.presence));
+                draw_circle(dc, dot, presence_color(p.presence_state));
 
                 RECT tag{ row.left + scale_x(32, w), row.top, row.right - scale_x(150, w), row.top + (row.bottom - row.top) * 3 / 5 };
                 draw_text(dc, m_row_font, tag, p.gamertag.c_str(), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
@@ -674,6 +665,13 @@ namespace
                 int art = row.bottom - row.top - scale_y(10, h);
                 RECT box{ row.left + scale_x(8, w), row.top + scale_y(5, h), row.left + scale_x(8, w) + art, row.top + scale_y(5, h) + art };
                 fill_round_rect(dc, box, sel ? RGB(60, 90, 40) : RGB(50, 56, 62), sel ? RGB(120, 170, 60) : RGB(80, 88, 96), scale_y(3, h));
+                if (g.icon)
+                {
+                    int pad = scale_y(4, h);
+                    int sz = art - pad * 2;
+                    if (sz < 8) sz = 8;
+                    DrawIconEx(dc, box.left + pad, box.top + pad, g.icon, sz, sz, 0, nullptr, DI_NORMAL);
+                }
 
                 RECT title{ box.right + scale_x(10, w), row.top + scale_y(6, h), row.right - scale_x(80, w), row.top + (row.bottom - row.top) / 2 };
                 draw_text(dc, m_row_font, title, g.title.c_str(), DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
@@ -789,7 +787,7 @@ namespace
         {
             int w = client_w(), h = client_h();
             RECT client{}; GetClientRect(m_handle, &client);
-            fill_rect(dc, client, RGB(0, 0, 0));
+            fill_rect(dc, client, RGB(255, 0, 255));
 
             paint_blade(dc, w, h);
 
@@ -808,92 +806,9 @@ namespace
             }
 
             paint_footer(dc, w, h);
-            paint_modal(dc, w, h);
+            m_msgbox.paint(dc, w, h, m_title_font, m_row_font);
         }
 
-        void paint_modal(HDC dc, int w, int h)
-        {
-            if (m_modal == e_modal::none)
-                return;
-
-            RECT client{};
-            GetClientRect(m_handle, &client);
-
-            // Centered modal card (guide remains visible behind)
-            int mw = scale_x(420, w);
-            int mh = scale_y(220, h);
-            RECT card{
-                (client.right - mw) / 2,
-                (client.bottom - mh) / 2,
-                (client.right + mw) / 2,
-                (client.bottom + mh) / 2
-            };
-            fill_round_rect(dc, card, RGB(40, 44, 48), RGB(90, 140, 60), round_radius(w, h) * 2);
-
-            // Title bar
-            RECT title_r{ card.left, card.top, card.right, card.top + scale_y(44, h) };
-            fill_rect(dc, title_r, RGB(50, 70, 40));
-            draw_text(dc, m_title_font, title_r, m_modal_title.c_str(),
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE, RGB(220, 240, 180));
-
-            // Body
-            RECT body_r{
-                card.left + scale_x(20, w),
-                title_r.bottom + scale_y(12, h),
-                card.right - scale_x(20, w),
-                card.bottom - scale_y(70, h)
-            };
-            draw_text(dc, m_row_font, body_r, m_modal_body.c_str(),
-                DT_CENTER | DT_WORDBREAK, RGB(220, 224, 228));
-
-            // Buttons
-            int bw = scale_x(140, w);
-            int bh = scale_y(40, h);
-            int by = card.bottom - scale_y(56, h);
-
-            if (m_modal == e_modal::message_actions)
-            {
-                int gap = scale_x(16, w);
-                RECT btn_reply{
-                    card.left + (card.right - card.left - 2 * bw - gap) / 2,
-                    by,
-                    card.left + (card.right - card.left - 2 * bw - gap) / 2 + bw,
-                    by + bh
-                };
-                RECT btn_close{ btn_reply.right + gap, by, btn_reply.right + gap + bw, by + bh };
-
-                bool reply_sel = (m_modal_choice == 0);
-                bool close_sel = (m_modal_choice == 1);
-
-                fill_round_rect(dc, btn_reply,
-                    reply_sel ? RGB(70, 110, 40) : RGB(50, 54, 58),
-                    reply_sel ? RGB(110, 160, 60) : RGB(70, 76, 82),
-                    round_radius(w, h));
-                fill_round_rect(dc, btn_close,
-                    close_sel ? RGB(70, 110, 40) : RGB(50, 54, 58),
-                    close_sel ? RGB(110, 160, 60) : RGB(70, 76, 82),
-                    round_radius(w, h));
-
-                draw_text(dc, m_row_font, btn_reply, L"A  Reply",
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    reply_sel ? RGB(255,255,255) : RGB(200, 206, 212));
-                draw_text(dc, m_row_font, btn_close, L"B  Close",
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                    close_sel ? RGB(255,255,255) : RGB(200, 206, 212));
-            }
-            else // info
-            {
-                RECT btn_ok{
-                    card.left + (card.right - card.left - bw) / 2,
-                    by,
-                    card.left + (card.right - card.left - bw) / 2 + bw,
-                    by + bh
-                };
-                fill_round_rect(dc, btn_ok, RGB(70, 110, 40), RGB(110, 160, 60), round_radius(w, h));
-                draw_text(dc, m_row_font, btn_ok, L"A  OK",
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE, RGB(255,255,255));
-            }
-        }
 
         // --- Navigation ---
         int list_count() const
@@ -958,43 +873,83 @@ namespace
             switch (m_section) {
             case e_section::friends:
                 if (m_selected >= 0 && m_selected < static_cast<int>(m_friends.size()))
-                    MessageBoxW(m_handle, (m_friends[m_selected].gamertag + L"\n" + m_friends[m_selected].status).c_str(), L"Friend", MB_OK);
+                {
+                    m_msgbox.show(
+                        L"Friend",
+                        m_friends[m_selected].gamertag + L"\n" + m_friends[m_selected].status,
+                        controller_message_box::buttons::ok,
+                        L"A  OK");
+                    InvalidateRect(m_handle, nullptr, FALSE);
+                }
                 break;
             case e_section::messages:
-                if (m_selected >= 0 && m_selected < static_cast<int>(m_messages.size())) {
+                if (m_selected >= 0 && m_selected < static_cast<int>(m_messages.size()))
+                {
                     m_messages[m_selected].unread = false;
                     s_message const& msg = m_messages[m_selected];
-                    m_modal = e_modal::message_actions;
-                    m_modal_title = L"Message";
-                    m_modal_body = msg.from + L"\n" + msg.preview;
-                    m_modal_choice = 0;
                     m_modal_msg_index = m_selected;
+                    m_msgbox.show(
+                        L"Message",
+                        msg.from + L"\n" + msg.preview,
+                        controller_message_box::buttons::yes_no,
+                        L"A  Reply",
+                        L"B  Close",
+                        [this](controller_message_box::result r) { on_message_actions_result(r); });
                     InvalidateRect(m_handle, nullptr, FALSE);
                 }
                 break;
             case e_section::party:
-                if (m_selected >= 0 && m_selected < static_cast<int>(m_members.size())) {
+                if (m_selected >= 0 && m_selected < static_cast<int>(m_members.size()))
+                {
                     auto& m = m_members[m_selected];
-                    if (m.status == e_member_status::invitable) {
+                    if (m.status == e_member_status::invitable)
+                    {
                         m.status = e_member_status::joining;
                         m.activity = L"Connecting...";
-                        MessageBoxW(m_handle, (L"Inviting " + m.gamertag).c_str(), L"Party", MB_OK);
-                        InvalidateRect(m_handle, nullptr, FALSE);
-                    } else {
-                        MessageBoxW(m_handle, (m.gamertag + L"\n" + m.activity).c_str(), L"Party Member", MB_OK);
+                        m_msgbox.show(
+                            L"Party",
+                            L"Inviting " + m.gamertag,
+                            controller_message_box::buttons::ok,
+                            L"A  OK");
                     }
+                    else
+                    {
+                        m_msgbox.show(
+                            L"Party Member",
+                            m.gamertag + L"\n" + m.activity,
+                            controller_message_box::buttons::ok,
+                            L"A  OK");
+                    }
+                    InvalidateRect(m_handle, nullptr, FALSE);
                 }
                 break;
             case e_section::players:
-                if (m_selected >= 0 && m_selected < static_cast<int>(m_players.size())) {
+                if (m_selected >= 0 && m_selected < static_cast<int>(m_players.size()))
+                {
                     m_players[m_selected].is_friend = true;
-                    MessageBoxW(m_handle, (L"Friend request sent to " + m_players[m_selected].gamertag).c_str(), L"Players Met", MB_OK);
+                    m_msgbox.show(
+                        L"Players Met",
+                        L"Friend request sent to " + m_players[m_selected].gamertag,
+                        controller_message_box::buttons::ok,
+                        L"A  OK");
                     InvalidateRect(m_handle, nullptr, FALSE);
                 }
                 break;
             case e_section::games:
                 if (m_selected >= 0 && m_selected < static_cast<int>(m_games.size()))
-                    MessageBoxW(m_handle, (L"Launching " + m_games[m_selected].title).c_str(), L"Quick Launch", MB_OK);
+                {
+                    s_game const& g = m_games[m_selected];
+                    if (g.path.empty() || !launch_process(g.path, g.args, g.working_dir))
+                    {
+                        m_msgbox.show(
+                            L"Quick Launch",
+                            L"Failed to launch:\n" + g.title +
+                            (g.path.empty() ? L"" : (L"\n\n" + g.path)),
+                            controller_message_box::buttons::ok,
+                            L"A  OK");
+                        InvalidateRect(m_handle, nullptr, FALSE);
+                    }
+                }
                 break;
             default: break;
             }
@@ -1038,7 +993,13 @@ namespace
             }
             else
             {
-                MessageBoxW(m_handle, L"Could not open virtual keyboard.", L"Message Center", MB_OK | MB_ICONWARNING);
+                m_msgbox.show(
+                    L"Message Center",
+                    L"Could not open virtual keyboard.",
+                    controller_message_box::buttons::ok,
+                    L"A  OK");
+                InvalidateRect(m_handle, nullptr, FALSE);
+                InvalidateRect(m_handle, nullptr, FALSE);
             }
         }
 
@@ -1079,10 +1040,13 @@ namespace
                 m_selected = 0;
                 m_scroll = 0;
 
-                m_modal = e_modal::info;
-                m_modal_title = L"Message Sent";
-                m_modal_body = L"To: " + m_reply_to + L"\n\n" + m_kb_result;
-                m_modal_choice = 0;
+                m_msgbox.show(
+                    L"Message Sent",
+                    L"To: " + m_reply_to + L"\n\n" + m_kb_result,
+                    controller_message_box::buttons::ok,
+                    L"A  OK",
+                    nullptr,
+                    [this](controller_message_box::result r) { on_info_result(r); });
             }
 
             m_reply_to.clear();
@@ -1090,32 +1054,26 @@ namespace
             InvalidateRect(m_handle, nullptr, FALSE);
         }
 
-        void close_modal()
+        void on_message_actions_result(controller_message_box::result r)
         {
-            m_modal = e_modal::none;
+            if (r == controller_message_box::result::primary &&
+                m_modal_msg_index >= 0 &&
+                m_modal_msg_index < static_cast<int>(m_messages.size()))
+            {
+                std::wstring to = m_messages[m_modal_msg_index].from;
+                m_modal_msg_index = -1;
+                start_reply(to);
+                return;
+            }
             m_modal_msg_index = -1;
             InvalidateRect(m_handle, nullptr, FALSE);
         }
 
-        void confirm_modal()
+        void on_info_result(controller_message_box::result)
         {
-            if (m_modal == e_modal::message_actions)
-            {
-                if (m_modal_choice == 0 && m_modal_msg_index >= 0 &&
-                    m_modal_msg_index < static_cast<int>(m_messages.size()))
-                {
-                    std::wstring to = m_messages[m_modal_msg_index].from;
-                    close_modal();
-                    start_reply(to);
-                    return;
-                }
-                close_modal();
-            }
-            else if (m_modal == e_modal::info)
-            {
-                close_modal();
-            }
+            InvalidateRect(m_handle, nullptr, FALSE);
         }
+
 
         void poll_controller()
         {
@@ -1132,37 +1090,13 @@ namespace
             m_prev_buttons = buttons;
 
             // Modal takes input priority
-            if (m_modal != e_modal::none)
+            if (m_msgbox.visible())
             {
-                if (pressed & XINPUT_GAMEPAD_B) {
-                    if (m_modal == e_modal::message_actions) {
-                        m_modal_choice = 1;
-                        confirm_modal();
-                    } else {
-                        close_modal();
-                    }
+                if (m_msgbox.handle_controller(pressed, st.Gamepad.sThumbLX, GetTickCount()))
+                {
+                    InvalidateRect(m_handle, nullptr, FALSE);
                     return;
                 }
-                if (pressed & XINPUT_GAMEPAD_A) {
-                    confirm_modal();
-                    return;
-                }
-                if (m_modal == e_modal::message_actions) {
-                    if (pressed & (XINPUT_GAMEPAD_DPAD_LEFT | XINPUT_GAMEPAD_DPAD_RIGHT)) {
-                        m_modal_choice = 1 - m_modal_choice;
-                        InvalidateRect(m_handle, nullptr, FALSE);
-                    }
-                    SHORT sx = st.Gamepad.sThumbLX;
-                    if ((sx > k_stick_deadzone || sx < -k_stick_deadzone)) {
-                        DWORD now = GetTickCount();
-                        if (now - m_last_nav >= 180) {
-                            m_modal_choice = 1 - m_modal_choice;
-                            m_last_nav = now;
-                            InvalidateRect(m_handle, nullptr, FALSE);
-                        }
-                    }
-                }
-                return;
             }
 
             if (pressed & XINPUT_GAMEPAD_B) { go_back(); return; }
@@ -1209,32 +1143,9 @@ namespace
             }
             case WM_ERASEBKGND: return TRUE;
             case WM_KEYDOWN:
-                if (m_modal != e_modal::none) {
-                    switch (wp) {
-                    case VK_ESCAPE:
-                    case 'B': case 'b':
-                        if (m_modal == e_modal::message_actions) {
-                            m_modal_choice = 1;
-                            confirm_modal();
-                        } else close_modal();
-                        break;
-                    case VK_RETURN:
-                    case 'A': case 'a':
-                        confirm_modal();
-                        break;
-                    case VK_LEFT:
-                        if (m_modal == e_modal::message_actions) {
-                            m_modal_choice = 0;
-                            InvalidateRect(m_handle, nullptr, FALSE);
-                        }
-                        break;
-                    case VK_RIGHT:
-                        if (m_modal == e_modal::message_actions) {
-                            m_modal_choice = 1;
-                            InvalidateRect(m_handle, nullptr, FALSE);
-                        }
-                        break;
-                    }
+                if (m_msgbox.visible()) {
+                    if (m_msgbox.handle_key(wp))
+                        InvalidateRect(m_handle, nullptr, FALSE);
                     return 0;
                 }
                 switch (wp) {
@@ -1265,6 +1176,7 @@ namespace
             case WM_CLOSE: close(); return 0;
             case WM_NCDESTROY:
                 KillTimer(m_handle, k_controller_timer_id);
+                for (auto& g : m_games) { if (g.icon) { DestroyIcon(g.icon); g.icon = nullptr; } }
                 release_fonts();
                 return 0;
             }
@@ -1290,12 +1202,8 @@ namespace
         std::wstring m_gamertag, m_motto, m_location, m_bio, m_reputation, m_zone, m_member_since;
         int m_gamerscore = 0, m_games_played = 0;
 
-        // In-guide modal (controller-friendly, replaces MessageBox)
-        enum class e_modal { none, message_actions, info };
-        e_modal m_modal = e_modal::none;
-        std::wstring m_modal_title;
-        std::wstring m_modal_body;
-        int m_modal_choice = 0; // 0 = primary (Reply/OK), 1 = secondary (Close)
+        // Controller-friendly modal (shared class)
+        controller_message_box m_msgbox;
         int m_modal_msg_index = -1;
 
         // Message compose via virtual keyboard
