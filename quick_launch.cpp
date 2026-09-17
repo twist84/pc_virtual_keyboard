@@ -523,12 +523,49 @@ namespace
                 return;
 
             s_game const& g = m_games[m_selected];
-            if (g.path.empty() || !launch_process(g.path, g.args, g.working_dir))
+            if (g.path.empty())
             {
                 m_msgbox.show(
                     L"Quick Launch",
-                    L"Failed to launch:\n" + g.title +
-                    (g.path.empty() ? L"" : (L"\n\n" + g.path)),
+                    L"Failed to launch:\n" + g.title,
+                    controller_message_box::buttons::ok,
+                    L"A  OK");
+                InvalidateRect(m_handle, nullptr, FALSE);
+                return;
+            }
+
+            unsigned long running = find_running_process(g.path);
+            if (running != 0)
+            {
+                m_msgbox.show(
+                    L"Quick Launch",
+                    g.title + L" is already running.\n\nClose it?",
+                    controller_message_box::buttons::yes_no,
+                    L"A  Close",
+                    L"B  Cancel",
+                    [this, running, title = g.title](controller_message_box::result r) {
+                        if (r == controller_message_box::result::primary)
+                        {
+                            if (!terminate_process_id(running))
+                            {
+                                m_msgbox.show(
+                                    L"Quick Launch",
+                                    L"Could not close:\n" + title,
+                                    controller_message_box::buttons::ok,
+                                    L"A  OK");
+                            }
+                        }
+                        InvalidateRect(m_handle, nullptr, FALSE);
+                    });
+                InvalidateRect(m_handle, nullptr, FALSE);
+                return;
+            }
+
+            if (!launch_process(g.path, g.args, g.working_dir))
+            {
+                m_msgbox.show(
+                    L"Quick Launch",
+                    L"Failed to launch:\n" + g.title + L"\n\n" + g.path,
                     controller_message_box::buttons::ok,
                     L"A  OK");
                 InvalidateRect(m_handle, nullptr, FALSE);

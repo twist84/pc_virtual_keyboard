@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <shellapi.h>
 #pragma comment(lib, "shell32.lib")
 #include <fstream>
@@ -211,56 +212,186 @@ namespace xbox360_ui
         if (!ok)
             return false;
 
-        // Allow the new process to take foreground, then focus its main window
         AllowSetForegroundWindow(pi.dwProcessId);
         WaitForInputIdle(pi.hProcess, 5000);
 
-        struct find_data
-        {
-            DWORD pid = 0;
-            HWND hwnd = nullptr;
+        auto collect_pids = [](DWORD root_pid) {
+            std::vector<DWORD> pids;
+            pids.push_back(root_pid);
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap == INVALID_HANDLE_VALUE)
+                return pids;
+            PROCESSENTRY32W pe{};
+            pe.dwSize = sizeof(pe);
+            if (Process32FirstW(snap, &pe))
+            {
+                do
+                {
+                    if (pe.th32ParentProcessID == root_pid)
+                        pids.push_back(pe.th32ProcessID);
+                } while (Process32NextW(snap, &pe));
+            }
+            CloseHandle(snap);
+            return pids;
         };
 
-        find_data data;
-        data.pid = pi.dwProcessId;
+        struct enum_ctx
+        {
+            std::vector<DWORD> pids;
+            HWND best_gui = nullptr;
+            int best_gui_area = -1;
+        };
 
-        auto enum_proc = [](HWND hwnd, LPARAM lp) -> BOOL {
-            auto* fd = reinterpret_cast<find_data*>(lp);
+        auto enum_cb = [](HWND hwnd, LPARAM lp) -> BOOL {
+            auto* ctx = reinterpret_cast<enum_ctx*>(lp);
             DWORD wnd_pid = 0;
             GetWindowThreadProcessId(hwnd, &wnd_pid);
-            if (wnd_pid != fd->pid)
+            bool match = false;
+            for (DWORD p : ctx->pids)
+            {
+                if (p == wnd_pid)
+                {
+                    match = true;
+                    break;
+                }
+            }
+            if (!match)
                 return TRUE;
             if (!IsWindowVisible(hwnd))
                 return TRUE;
             if (GetWindow(hwnd, GW_OWNER) != nullptr)
                 return TRUE;
-            wchar_t title[4]{};
-            GetWindowTextW(hwnd, title, 4);
-            // Prefer windows with a title (skip tool-only)
-            if (title[0] == L'\0')
+
+            // Skip console host windows (associated console, not the game UI)
+            wchar_t cls[64]{};
+            GetClassNameW(hwnd, cls, 64);
+            if (_wcsicmp(cls, L"ConsoleWindowClass") == 0)
                 return TRUE;
-            fd->hwnd = hwnd;
-            return FALSE;
+
+            RECT rc{};
+            GetWindowRect(hwnd, &rc);
+            int area = (rc.right - rc.left) * (rc.bottom - rc.top);
+            if (area < 200)
+                return TRUE;
+
+            if (area > ctx->best_gui_area)
+            {
+                ctx->best_gui_area = area;
+                ctx->best_gui = hwnd;
+            }
+            return TRUE;
         };
 
-        // Retry briefly — some apps create the window after InputIdle
-        for (int attempt = 0; attempt < 20 && data.hwnd == nullptr; ++attempt)
+        HWND best = nullptr;
+        for (int attempt = 0; attempt < 40; ++attempt)
         {
-            EnumWindows(enum_proc, reinterpret_cast<LPARAM>(&data));
-            if (data.hwnd == nullptr)
-                Sleep(50);
+            enum_ctx ctx;
+            ctx.pids = collect_pids(pi.dwProcessId);
+            EnumWindows(enum_cb, reinterpret_cast<LPARAM>(&ctx));
+            if (ctx.best_gui != nullptr)
+            {
+                best = ctx.best_gui;
+                break;
+            }
+            Sleep(50);
         }
 
-        if (data.hwnd != nullptr)
+        if (best != nullptr)
         {
-            ShowWindow(data.hwnd, SW_RESTORE);
-            BringWindowToTop(data.hwnd);
-            SetForegroundWindow(data.hwnd);
-            SetActiveWindow(data.hwnd);
+            ShowWindow(best, SW_RESTORE);
+            BringWindowToTop(best);
+            SetForegroundWindow(best);
+            SetActiveWindow(best);
         }
 
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         return true;
     }
+
+    static std::wstring normalize_path(std::wstring p)
+    {
+        for (auto& c : p)
+        {
+            if (c == L'/') c = L'\\';
+            c = static_cast<wchar_t>(towlower(c));
+        }
+        return p;
+    }
+
+    static std::wstring file_name_only(std::wstring const& path)
+    {
+        size_t slash = path.find_last_of(L"\\/");
+        if (slash == std::wstring::npos)
+            return normalize_path(path);
+        return normalize_path(path.substr(slash + 1));
+    }
+
+    unsigned long find_running_process(std::wstring const& path)
+    {
+        if (path.empty())
+            return 0;
+
+        std::wstring target_full = normalize_path(path);
+        std::wstring target_name = file_name_only(path);
+
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE)
+            return 0;
+
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        DWORD found = 0;
+        DWORD self = GetCurrentProcessId();
+
+        if (Process32FirstW(snap, &pe))
+        {
+            do
+            {
+                if (pe.th32ProcessID == self)
+                    continue;
+
+                std::wstring exe_name = normalize_path(pe.szExeFile);
+                if (exe_name != target_name)
+                    continue;
+
+                HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+                if (!proc)
+                {
+                    // Name matched; accept if we cannot query full path
+                    found = pe.th32ProcessID;
+                    break;
+                }
+
+                wchar_t image[MAX_PATH]{};
+                DWORD size = MAX_PATH;
+                bool path_match = false;
+                if (QueryFullProcessImageNameW(proc, 0, image, &size))
+                    path_match = (normalize_path(image) == target_full);
+                CloseHandle(proc);
+
+                if (path_match || target_full.find(L'\\') == std::wstring::npos)
+                {
+                    found = pe.th32ProcessID;
+                    break;
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+
+        CloseHandle(snap);
+        return found;
+    }
+
+    bool terminate_process_id(unsigned long process_id)
+    {
+        if (process_id == 0)
+            return false;
+        HANDLE proc = OpenProcess(PROCESS_TERMINATE, FALSE, process_id);
+        if (!proc)
+            return false;
+        BOOL ok = TerminateProcess(proc, 1);
+        CloseHandle(proc);
+        return ok != FALSE;
+    }
+
 }

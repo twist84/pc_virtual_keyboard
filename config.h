@@ -46,4 +46,11 @@ namespace xbox360_ui
         std::wstring const& path,
         std::wstring const& args = L"",
         std::wstring const& working_dir = L"");
+
+    // Returns process id if an instance of this executable is already running, else 0.
+    unsigned long find_running_process(std::wstring const& path);
+
+    // Terminate a process by id. Returns true on success.
+    bool terminate_process_id(unsigned long process_id);
 }
+
